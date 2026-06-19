@@ -814,7 +814,7 @@ void CHyprBar::renderBarTitle(const Vector2D& bufferSize, const float scale) {
     }
 
     const CHyprColor COLOR = m_bForcedTitleColor.value_or(configColor(COLORVAL));
-    m_pTextTex             = g_pHyprRenderer->renderText(m_szLastTitle, COLOR, scaledSize, false, FONT, maxWidth, WEIGHT.m_value);
+    // m_pTextTex             = g_pHyprRenderer->renderText(m_szLastTitle, COLOR, scaledSize, false, FONT, maxWidth, WEIGHT.m_value);
 
     m_pTextTex = g_pHyprRenderer->renderText(
         Hyprgraphics::CTextResource::STextResourceData{.text      = m_szLastTitle,
@@ -829,6 +829,8 @@ void CHyprBar::renderBarTitle(const Vector2D& bufferSize, const float scale) {
                                                        .hintStyle = CAIRO_HINT_STYLE_SLIGHT,
                                                        .ellipsize = true,
                                                        .wrap      = false,
+                                                       .weight    = WEIGHT.m_value,
+                                                       .italic    = false,
     });
 }
 
