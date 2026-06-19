@@ -12,7 +12,8 @@
 #include <hyprland/src/desktop/rule/windowRule/WindowRuleEffectContainer.hpp>
 #include <hyprland/src/config/lua/bindings/LuaBindingsInternal.hpp>
 #include <hyprland/src/config/lua/types/LuaConfigColor.hpp>
-#include <hyprland/src/state/MonitorState.hpp>
+
+#include <hyprland/src/config/values/types/FloatValue.hpp>
 
 #include <hyprutils/string/VarList.hpp>
 
@@ -31,6 +32,9 @@ APICALL EXPORT std::string PLUGIN_API_VERSION() {
     return HYPRLAND_API_VERSION;
 }
 
+static int parseLuaButton(lua_State* L, bool isLeft);
+static void parseLuaButtonState(lua_State* L, SHyprButtonState& state);
+
 static void onNewWindow(PHLWINDOW window) {
     if (!window->m_X11DoesntWantBorders) {
         if (std::ranges::any_of(window->m_windowDecorations, [](const auto& d) { return d->getDisplayName() == "Hyprbar"; }))
@@ -44,6 +48,21 @@ static void onNewWindow(PHLWINDOW window) {
 }
 
 static void onPreConfigReload() {
+    if (g_pLuaState) {
+        auto unref = [&](SHyprButtonAction& a) {
+            if (a.callback != LUA_NOREF) luaL_unref(g_pLuaState, LUA_REGISTRYINDEX, a.callback);
+        };
+        for (auto& button : g_pGlobalState->buttons) {
+            unref(button.click);
+            unref(button.rightClick);
+            unref(button.middleClick);
+            unref(button.scrollUp);
+            unref(button.scrollDown);
+            unref(button.scrollClick);
+        }
+    }
+    g_pGlobalState->buttonsLeft.clear();
+    g_pGlobalState->buttonsRight.clear();
     g_pGlobalState->buttons.clear();
 }
 
@@ -66,58 +85,18 @@ static void onUpdateWindowRules(PHLWINDOW window) {
     window->updateWindowDecos();
 }
 
-Hyprlang::CParseResult onNewButton(const char* K, const char* V) {
-    std::string                 v = V;
-    Hyprutils::String::CVarList vars(v);
-
-    Hyprlang::CParseResult      result;
-
-    // hyprbars-button = bgcolor, size, icon, action, fgcolor
-
-    if (vars[0].empty() || vars[1].empty()) {
-        result.setError("bgcolor and size cannot be empty");
-        return result;
-    }
-
-    float size = 10;
-    try {
-        size = std::stof(vars[1]);
-    } catch (std::exception& e) {
-        result.setError("failed to parse size");
-        return result;
-    }
-
-    bool userfg  = false;
-    auto fgcolor = Config::ParserUtils::parseColor("rgb(ffffff)");
-    auto bgcolor = Config::ParserUtils::parseColor(vars[0]);
-
-    if (!bgcolor) {
-        result.setError("invalid bgcolor");
-        return result;
-    }
-
-    if (vars.size() == 5) {
-        userfg  = true;
-        fgcolor = Config::ParserUtils::parseColor(vars[4]);
-    }
-
-    if (!fgcolor) {
-        result.setError("invalid fgcolor");
-        return result;
-    }
-
-    g_pGlobalState->buttons.push_back(SHyprButton{vars[3], userfg, *fgcolor, *bgcolor, size, vars[2]});
-
-    for (auto& b : g_pGlobalState->bars) {
-        b->m_bButtonsDirty = true;
-    }
-
-    return result;
-}
-
 int newLuaButton(lua_State* L) {
+    return parseLuaButton(L, false);
+}
+int newLuaButtonLeft(lua_State* L)   { return parseLuaButton(L, true); }
+int newLuaButtonRight(lua_State* L)  { return parseLuaButton(L, false); }
+
+static int parseLuaButton(lua_State* L, bool isLeft) {
     if (!lua_istable(L, 1))
-        return Config::Lua::Bindings::Internal::configError(L, "add_button: expected a table { bg_color, fg_color, size, icon, action }");
+        return Config::Lua::Bindings::Internal::configError(L, "add_button: expected a table { bg_color, fg_color, size, icon, click, ... }");
+
+    // Keep the Lua state for later callback execution.
+    g_pLuaState = L;
 
     SHyprButton button;
 
@@ -139,13 +118,15 @@ int newLuaButton(lua_State* L) {
 
         lua_getfield(L, 1, "fg_color");
 
-        Config::Lua::CLuaConfigColor parser(0);
-        auto                         err = parser.parse(L);
-        if (err.errorCode != Config::Lua::PARSE_ERROR_OK)
-            return Config::Lua::Bindings::Internal::configError(L, "add_button: failed to parse fg_color");
+        if (!lua_isnil(L, -1)) {
+            Config::Lua::CLuaConfigColor parser(0);
+            auto                         err = parser.parse(L);
+            if (err.errorCode != Config::Lua::PARSE_ERROR_OK)
+                return Config::Lua::Bindings::Internal::configError(L, "add_button: failed to parse fg_color");
 
-        button.userfg = true;
-        button.fgcol = parser.parsed();
+            button.userfg = true;
+            button.fgcol = parser.parsed();
+        }
     }
 
     {
@@ -154,9 +135,9 @@ int newLuaButton(lua_State* L) {
         lua_getfield(L, 1, "size");
 
         if (!lua_isnumber(L, -1))
-            return Config::Lua::Bindings::Internal::configError(L, "add_button: size must be an integer");
+            return Config::Lua::Bindings::Internal::configError(L, "add_button: size must be a number");
 
-        button.size = lua_tointeger(L, -1);
+        button.size = lua_tonumber(L, -1);
     }
 
     {
@@ -173,21 +154,122 @@ int newLuaButton(lua_State* L) {
     {
         Hyprutils::Utils::CScopeGuard x([L] { lua_pop(L, 1); });
 
-        lua_getfield(L, 1, "action");
+        lua_getfield(L, 1, "inactive_color");
 
-        if (!lua_isstring(L, -1))
-            return Config::Lua::Bindings::Internal::configError(L, "add_button: action must be a string");
-
-        button.cmd = lua_tostring(L, -1);
+        if (!lua_isnil(L, -1)) {
+            Config::Lua::CLuaConfigColor parser(0);
+            if (parser.parse(L).errorCode == Config::Lua::PARSE_ERROR_OK)
+                button.inactiveBgColor = parser.parsed();
+        }
     }
 
+    {
+        Hyprutils::Utils::CScopeGuard x([L] { lua_pop(L, 1); });
+
+        lua_getfield(L, 1, "inactive_scale");
+
+        if (lua_isnumber(L, -1))
+            button.inactiveScale = (float)lua_tonumber(L, -1);
+    }
+
+    {
+        Hyprutils::Utils::CScopeGuard x([L] { lua_pop(L, 1); });
+
+        lua_getfield(L, 1, "inactive_icon_scale");
+
+        if (lua_isnumber(L, -1))
+            button.inactiveIconScale = (float)lua_tonumber(L, -1);
+    }
+
+    {
+        Hyprutils::Utils::CScopeGuard x([L] { lua_pop(L, 1); });
+
+        lua_getfield(L, 1, "hover");
+
+        if (lua_istable(L, -1))
+            parseLuaButtonState(L, button.stateHover);
+    }
+
+    {
+        Hyprutils::Utils::CScopeGuard x([L] { lua_pop(L, 1); });
+
+        lua_getfield(L, 1, "press");
+
+        if (lua_istable(L, -1))
+            parseLuaButtonState(L, button.statePress);
+    }
+
+    auto parseAction = [&](const char* field, SHyprButtonAction& action) {
+        Hyprutils::Utils::CScopeGuard x([L] { lua_pop(L, 1); });
+        lua_getfield(L, 1, field);
+        if (lua_isstring(L, -1)) {
+            action.dispatcher = lua_tostring(L, -1);
+        } else if (!lua_isnil(L, -1)) {
+            lua_pushvalue(L, -1);
+            action.callback = luaL_ref(L, LUA_REGISTRYINDEX);
+        }
+    };
+    parseAction("click",         button.click);
+    parseAction("right_click",   button.rightClick);
+    parseAction("middle_click",  button.middleClick);
+    parseAction("scroll_up",     button.scrollUp);
+    parseAction("scroll_down",   button.scrollDown);
+    parseAction("scroll_click",  button.scrollClick);
+
+    size_t idx = g_pGlobalState->buttons.size();
     g_pGlobalState->buttons.push_back(std::move(button));
+    if (isLeft)
+        g_pGlobalState->buttonsLeft.push_back(idx);
+    else
+        g_pGlobalState->buttonsRight.push_back(idx);
 
     for (auto& b : g_pGlobalState->bars) {
+        if (!b)
+            continue;
         b->m_bButtonsDirty = true;
     }
 
     return 0;
+}
+
+static void parseLuaButtonState(lua_State* L, SHyprButtonState& state) {
+    {
+        lua_getfield(L, -1, "bg_color");
+        if (!lua_isnil(L, -1)) {
+            Config::Lua::CLuaConfigColor parser(0);
+            if (parser.parse(L).errorCode == Config::Lua::PARSE_ERROR_OK)
+                state.bgColor = parser.parsed();
+        }
+        lua_pop(L, 1);
+    }
+
+    {
+        lua_getfield(L, -1, "fg_color");
+        if (!lua_isnil(L, -1)) {
+            Config::Lua::CLuaConfigColor parser(0);
+            if (parser.parse(L).errorCode == Config::Lua::PARSE_ERROR_OK)
+                state.fgColor = parser.parsed();
+        }
+        lua_pop(L, 1);
+    }
+
+    {
+        lua_getfield(L, -1, "icon");
+        if (lua_isstring(L, -1)) state.icon = lua_tostring(L, -1);
+        lua_pop(L, 1);
+    }
+
+    {
+        lua_getfield(L, -1, "scale");
+        if (lua_isnumber(L, -1)) state.scale = (float)lua_tonumber(L, -1);
+        lua_pop(L, 1);
+    }
+
+    {
+        lua_getfield(L, -1, "icon_scale");
+        if (lua_isnumber(L, -1)) state.iconScale = (float)lua_tonumber(L, -1);
+        lua_pop(L, 1);
+    }
 }
 
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
@@ -225,12 +307,17 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         makeShared<Config::Values::CBoolValue>("plugin:hyprbars:bar_part_of_window", "Whether the bar is a part of the window (reserves space)", true);
     g_pGlobalState->config.barPrecedenceOverBorder =
         makeShared<Config::Values::CBoolValue>("plugin:hyprbars:bar_precedence_over_border", "Whether the bar is before, or after the border", false);
-    g_pGlobalState->config.barButtonsAlignment = makeShared<Config::Values::CStringValue>("plugin:hyprbars:bar_buttons_alignment", "Alignment of the bar buttons", "right");
     g_pGlobalState->config.barPadding          = makeShared<Config::Values::CIntValue>("plugin:hyprbars:bar_padding", "Padding of the bar", 7);
     g_pGlobalState->config.barButtonPadding    = makeShared<Config::Values::CIntValue>("plugin:hyprbars:bar_button_padding", "Padding of the bar buttons", 5);
+    g_pGlobalState->config.inactivePadScale    = makeShared<Config::Values::CFloatValue>("plugin:hyprbars:inactive_padding_scale", "Whether the padding of the buttons should be scaled along with them", 1.0f);
     g_pGlobalState->config.enabled             = makeShared<Config::Values::CBoolValue>("plugin:hyprbars:enabled", "Whether bars are enabled", true);
-    g_pGlobalState->config.iconOnHover         = makeShared<Config::Values::CBoolValue>("plugin:hyprbars:icon_on_hover", "Whether to use an icon on hover of the buttons", false);
+    g_pGlobalState->config.iconOnHover         = makeShared<Config::Values::CIntValue>("plugin:hyprbars:icon_on_hover", "Icon visibility mode: 0=always show when focused, 1=show when mouse is on the bar, 2=show only when hovering a specific button", 0);
     g_pGlobalState->config.onDoubleClick       = makeShared<Config::Values::CStringValue>("plugin:hyprbars:on_double_click", "Action to execute on double click of the bar", "");
+    g_pGlobalState->config.animationSpeed      = makeShared<Config::Values::CIntValue>("plugin:hyprbars:animation_speed", "Animation speed in ms for button transitions", 150);
+    g_pGlobalState->config.animationBezier     = makeShared<Config::Values::CStringValue>("plugin:hyprbars:animation_bezier", "Animation bezier curve name (e.g. \"default\", \"easeOut\", or a custom bezier name)", "default");
+    g_pGlobalState->config.inactiveScale       = makeShared<Config::Values::CFloatValue>("plugin:hyprbars:inactive_scale", "Default scale for buttons in inactive state", 1.0f);
+    g_pGlobalState->config.fixButtonCenter     = makeShared<Config::Values::CBoolValue>("plugin:hyprbars:fix_button_center", "When true buttons keep centers fixed when scaled; when false positions shift and inactivePadScale applies", true);
+    g_pGlobalState->config.iconScale           = makeShared<Config::Values::CFloatValue>("plugin:hyprbars:icon_scale", "Icon/text glyph size as a fraction of the button circle diameter", 0.62f);
 
     HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.barColor);
     HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.textColor);
@@ -244,17 +331,21 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.barTextAlign);
     HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.barPartOfWindow);
     HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.barPrecedenceOverBorder);
-    HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.barButtonsAlignment);
     HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.barPadding);
     HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.barButtonPadding);
+    HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.inactivePadScale);
     HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.enabled);
     HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.iconOnHover);
     HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.onDoubleClick);
+    HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.animationSpeed);
+    HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.animationBezier);
+    HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.inactiveScale);
+    HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.fixButtonCenter);
+    HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.iconScale);
 
-    if (Config::mgr()->type() == Config::CONFIG_LEGACY)
-        HyprlandAPI::addConfigKeyword(PHANDLE, "plugin:hyprbars:hyprbars-button", onNewButton, Hyprlang::SHandlerOptions{});
-    else
-        HyprlandAPI::addLuaFunction(PHANDLE, "hyprbars", "add_button", ::newLuaButton);
+    HyprlandAPI::addLuaFunction(PHANDLE, "hyprbars", "add_button", ::newLuaButton);
+    HyprlandAPI::addLuaFunction(PHANDLE, "hyprbars", "add_button_left", ::newLuaButtonLeft);
+    HyprlandAPI::addLuaFunction(PHANDLE, "hyprbars", "add_button_right", ::newLuaButtonRight);
     static auto P4 = Event::bus()->m_events.config.preReload.listen([&] { onPreConfigReload(); });
     static auto P5 = Event::bus()->m_events.config.reloaded.listen([&] { onConfigReloaded(); });
 
@@ -272,7 +363,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
-    for (auto& m : State::monitorState()->monitors())
+    for (auto& m : g_pCompositor->m_monitors)
         m->m_scheduledRecalc = true;
 
     g_pHyprRenderer->m_renderPass.removeAllOfType("CBarPassElement");

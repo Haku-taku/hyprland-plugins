@@ -65,7 +65,6 @@ class CHyprBar : public IHyprWindowDecoration {
     bool                       m_bWindowSizeChanged = false;
     bool                       m_hidden             = false;
     bool                       m_bTitleColorChanged = false;
-    bool                       m_bButtonHovered     = false;
     bool                       m_bLastEnabledState  = false;
     bool                       m_bWindowHasFocus    = false;
     std::optional<CHyprColor>  m_bForcedBarColor;
@@ -74,14 +73,26 @@ class CHyprBar : public IHyprWindowDecoration {
     Time::steady_tp            m_lastMouseDown = Time::steadyNow();
 
     PHLANIMVAR<CHyprColor>     m_cRealBarColor;
+    int                        m_iPressedIdx     = -1;
+    uint32_t                   m_iPressedButton  = 0;
+    bool                       m_bPressedIsRight = false;
+    bool                       m_bRendering      = false;
+    bool                       m_bMouseOnBar     = false;
+
+    std::vector<SHyprButtonInstance> m_vButtonInstances;
 
     Vector2D                   cursorRelativeToBar();
 
     void                       renderPass(PHLMONITOR, float const& a);
     void                       renderBarTitle(const Vector2D& bufferSize, const float scale);
     void renderBarButtons(CBox* barBox, const float scale, const float a);
-    void renderBarButtonsText(CBox* barBox, const float scale, const float a);
     void damageOnButtonHover();
+
+    void                       ensureButtonInstances();
+    void                       updateButtonStateAnimations();
+    SP<Render::ITexture>       getOrCreateIconTexture(SHyprButtonInstance& inst, int state, float buttonSize, CHyprColor col);
+    SP<Render::ITexture>       loadSvgIcon(const std::string& path, float pxSize);
+    void                       invalidateButtonTextures();
 
     bool inputIsValid();
     void onMouseButton(Event::SCallbackInfo& info, IPointer::SButtonEvent e);
@@ -89,11 +100,12 @@ class CHyprBar : public IHyprWindowDecoration {
     void onTouchUp(Event::SCallbackInfo& info, ITouch::SUpEvent e);
     void onMouseMove(Vector2D coords);
     void onTouchMove(Event::SCallbackInfo& info, ITouch::SMotionEvent e);
+    void onMouseAxis(Event::SCallbackInfo& info, IPointer::SAxisEvent e);
 
     void handleDownEvent(Event::SCallbackInfo& info, std::optional<ITouch::SDownEvent> touchEvent);
     void handleUpEvent(Event::SCallbackInfo& info);
     void handleMovement();
-    bool doButtonPress(Config::INTEGER barPadding, Config::INTEGER barButtonPadding, Config::INTEGER barHeight, Vector2D COORDS, bool BUTTONSRIGHT);
+    bool doButtonPress(Config::INTEGER barPadding, Config::INTEGER barButtonPadding, Config::INTEGER barHeight, Vector2D COORDS);
 
     CBox assignedBoxGlobal();
 
@@ -103,6 +115,7 @@ class CHyprBar : public IHyprWindowDecoration {
 
     CHyprSignalListener m_pTouchMoveCallback;
     CHyprSignalListener m_pMouseMoveCallback;
+    CHyprSignalListener m_pMouseAxisCallback;
 
     std::string         m_szLastTitle;
 
@@ -113,12 +126,23 @@ class CHyprBar : public IHyprWindowDecoration {
     int                 m_touchId        = 0;
 
     // store hover state for buttons as a bitfield
-    unsigned int m_iButtonHoverState = 0;
+    unsigned int m_iButtonHoverStateLeft  = 0;
+    unsigned int m_iButtonHoverStateRight = 0;
+    // store press state for buttons as a bitfield
+    unsigned int m_iButtonPressStateLeft  = 0;
+    unsigned int m_iButtonPressStateRight = 0;
+
+    SP<Hyprutils::Animation::SAnimationPropertyConfig> m_pAnimConfig;
+    PHLANIMVAR<float>    m_fPaddingScale;
 
     // for dynamic updates
     int    m_iLastHeight = 0;
+    int    m_fLastScale  = 0;
 
     size_t getVisibleButtonCount(Config::INTEGER barButtonPadding, Config::INTEGER barPadding, const Vector2D& bufferSize, const float scale);
+
+    float  effectivePaddingScale() const;
+    float  effectiveButtonSlot(float buttonSize, float btnScale, bool isFirst = false) const;
 
     friend class CBarPassElement;
 };

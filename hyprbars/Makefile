@@ -6,7 +6,7 @@ else
 endif
 
 CXXFLAGS ?= -O2
-CXXFLAGS += -shared -fPIC -std=c++2b -Wno-c++11-narrowing
+CXXFLAGS += -shared -fPIC -std=c++2b -Wno-narrowing
 INCLUDES = `pkg-config --cflags pixman-1 libdrm hyprland libinput libudev wayland-server xkbcommon`
 LIBS =
 
@@ -14,6 +14,9 @@ SRC = main.cpp barDeco.cpp BarPassElement.cpp
 TARGET = hyprbars.so
 
 all: $(TARGET)
+
+debug: CXXFLAGS += -g -O0
+debug: $(TARGET)
 
 $(TARGET): $(SRC)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(EXTRA_FLAGS) $(INCLUDES) $^ $> -o $@ $(LIBS)
@@ -25,4 +28,4 @@ meson-build:
 	mkdir -p build
 	cd build && meson .. && ninja
 
-.PHONY: all meson-build clean
+.PHONY: all debug meson-build clean
