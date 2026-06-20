@@ -53,6 +53,7 @@ static void onPreConfigReload() {
         auto unref = [&](SHyprButtonAction& a) {
             if (a.callback != LUA_NOREF) luaL_unref(g_pLuaState, LUA_REGISTRYINDEX, a.callback);
         };
+        unref(g_pGlobalState->config.onDoubleClick);
         for (auto& button : g_pGlobalState->buttons) {
             unref(button.click);
             unref(button.rightClick);
@@ -91,6 +92,26 @@ int newLuaButton(lua_State* L) {
 }
 int newLuaButtonLeft(lua_State* L)   { return parseLuaButton(L, true); }
 int newLuaButtonRight(lua_State* L)  { return parseLuaButton(L, false); }
+
+static int luaOnDoubleClick(lua_State* L) {
+    g_pLuaState = L;
+    auto& action = g_pGlobalState->config.onDoubleClick;
+
+    // Release any previous callback.
+    if (action.callback != LUA_NOREF) {
+        luaL_unref(L, LUA_REGISTRYINDEX, action.callback);
+        action.callback   = LUA_NOREF;
+        action.dispatcher = "";
+    }
+
+    if (lua_isstring(L, 1)) {
+        action.dispatcher = lua_tostring(L, 1);
+    } else if (!lua_isnil(L, 1)) {
+        lua_pushvalue(L, 1);
+        action.callback = luaL_ref(L, LUA_REGISTRYINDEX);
+    }
+    return 0;
+}
 
 static int parseLuaButton(lua_State* L, bool isLeft) {
     if (!lua_istable(L, 1))
@@ -313,9 +334,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     g_pGlobalState->config.inactivePadScale    = makeShared<Config::Values::CFloatValue>("plugin:hyprbars:inactive_padding_scale", "Whether the padding of the buttons should be scaled along with them", 1.0f);
     g_pGlobalState->config.enabled             = makeShared<Config::Values::CBoolValue>("plugin:hyprbars:enabled", "Whether bars are enabled", true);
     g_pGlobalState->config.iconOnHover         = makeShared<Config::Values::CIntValue>("plugin:hyprbars:icon_on_hover", "Icon visibility mode: 0=always show when focused, 1=show when mouse is on the bar, 2=show only when hovering a specific button", 0);
-    g_pGlobalState->config.onDoubleClick       = makeShared<Config::Values::CStringValue>("plugin:hyprbars:on_double_click", "Action to execute on double click of the bar", "");
     g_pGlobalState->config.animationSpeed      = makeShared<Config::Values::CIntValue>("plugin:hyprbars:animation_speed", "Animation speed in ms for button transitions", 150);
-    g_pGlobalState->config.animationBezier     = makeShared<Config::Values::CStringValue>("plugin:hyprbars:animation_bezier", "Animation bezier curve name (e.g. \"default\", \"easeOut\", or a custom bezier name)", "default");
+    g_pGlobalState->config.animationBezier     = makeShared<Config::Values::CStringValue>("plugin:hyprbars:animation_bezier", "Animation bezier curve name (e.g. \"default\", \"easeOut\", or a custom bezier name)", "");
     g_pGlobalState->config.inactiveScale       = makeShared<Config::Values::CFloatValue>("plugin:hyprbars:inactive_scale", "Default scale for buttons in inactive state", 1.0f);
     g_pGlobalState->config.fixButtonCenter     = makeShared<Config::Values::CBoolValue>("plugin:hyprbars:fix_button_center", "When true buttons keep centers fixed when scaled; when false positions shift and inactivePadScale applies", true);
     g_pGlobalState->config.iconScale           = makeShared<Config::Values::CFloatValue>("plugin:hyprbars:icon_scale", "Icon/text glyph size as a fraction of the button circle diameter", 0.62f);
@@ -337,7 +357,6 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.inactivePadScale);
     HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.enabled);
     HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.iconOnHover);
-    HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.onDoubleClick);
     HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.animationSpeed);
     HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.animationBezier);
     HyprlandAPI::addConfigValueV2(PHANDLE, g_pGlobalState->config.inactiveScale);
@@ -347,6 +366,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addLuaFunction(PHANDLE, "hyprbars", "add_button", ::newLuaButton);
     HyprlandAPI::addLuaFunction(PHANDLE, "hyprbars", "add_button_left", ::newLuaButtonLeft);
     HyprlandAPI::addLuaFunction(PHANDLE, "hyprbars", "add_button_right", ::newLuaButtonRight);
+    HyprlandAPI::addLuaFunction(PHANDLE, "hyprbars", "on_double_click", ::luaOnDoubleClick);
+
     static auto P4 = Event::bus()->m_events.config.preReload.listen([&] { onPreConfigReload(); });
     static auto P5 = Event::bus()->m_events.config.reloaded.listen([&] { onConfigReloaded(); });
 

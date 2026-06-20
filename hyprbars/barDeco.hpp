@@ -77,6 +77,7 @@ class CHyprBar : public IHyprWindowDecoration {
     uint32_t                   m_iPressedButton  = 0;
     bool                       m_bPressedIsRight = false;
     bool                       m_bRendering      = false;
+    bool                       m_bInstsInvalid   = false;
     bool                       m_bMouseOnBar     = false;
 
     std::vector<SHyprButtonInstance> m_vButtonInstances;

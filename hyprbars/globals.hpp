@@ -167,7 +167,8 @@ struct SGlobalState {
         SP<Config::Values::CIntValue>        barPadding;
         SP<Config::Values::CIntValue>        barButtonPadding;
         SP<Config::Values::CBoolValue>       barBlur, barTitleEnabled, barPartOfWindow, barPrecedenceOverBorder, enabled, fixButtonCenter;
-        SP<Config::Values::CStringValue>     barTextFont, barTextAlign, onDoubleClick;
+        SP<Config::Values::CStringValue>     barTextFont, barTextAlign;
+        SHyprButtonAction                    onDoubleClick;
         SP<Config::Values::CFloatValue>      iconScale, inactivePadScale, inactiveScale;
         SP<Config::Values::CIntValue>        iconOnHover;
     } config;

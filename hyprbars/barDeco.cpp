@@ -58,16 +58,22 @@ float CHyprBar::effectiveButtonSlot(float buttonSize, float btnScale, bool isFir
     return buttonSize * btnScale;
 }
 
+static void runDispatcher(const std::string& str) {
+    if (str.empty())
+        return;
+    const auto  spc = str.find(' ');
+    std::string disp = spc == std::string::npos ? str : str.substr(0, spc);
+    std::string args = spc == std::string::npos ? "" : str.substr(spc + 1);
+    if (g_pKeybindManager->m_dispatchers.contains(disp))
+        g_pKeybindManager->m_dispatchers[disp](args);
+    else
+        Log::logger->log(Log::ERR, "[hyprbars] unknown dispatcher: {}", disp);
+}
+
 void executeButtonAction(const SHyprButtonAction& action) {
     // Dispatcher string (e.g. "exec kitty", "workspace +1") takes priority.
     if (!action.dispatcher.empty()) {
-        const auto  spc = action.dispatcher.find(' ');
-        std::string disp = spc == std::string::npos ? action.dispatcher : action.dispatcher.substr(0, spc);
-        std::string args = spc == std::string::npos ? "" : action.dispatcher.substr(spc + 1);
-        if (g_pKeybindManager->m_dispatchers.contains(disp))
-            g_pKeybindManager->m_dispatchers[disp](args);
-        else
-            Log::logger->log(Log::ERR, "[hyprbars] unknown dispatcher: {}", disp);
+        runDispatcher(action.dispatcher);
         return;
     }
     // Lua callback or dispatch object.
@@ -135,7 +141,9 @@ CHyprBar::CHyprBar(PHLWINDOW pWindow) : IHyprWindowDecoration(pWindow) {
     m_pAnimConfig = makeShared<Hyprutils::Animation::SAnimationPropertyConfig>();
     m_pAnimConfig->internalEnabled = 1;
     m_pAnimConfig->internalSpeed   = g_pGlobalState->config.animationSpeed->value() / 100.0f;
-    m_pAnimConfig->internalBezier  = g_pGlobalState->config.animationBezier->value();
+    const auto BEZIER = g_pGlobalState->config.animationBezier->value();
+    if (!BEZIER.empty())
+        m_pAnimConfig->internalBezier = BEZIER;
     m_pAnimConfig->pValues         = m_pAnimConfig;
 
     // button events
@@ -167,6 +175,8 @@ CHyprBar::~CHyprBar() {
 }
 
 void CHyprBar::ensureButtonInstances() {
+    m_bInstsInvalid = false;
+
     auto pWin = m_pWindow.lock();
     if (!pWin)
         return;
@@ -231,6 +241,13 @@ void CHyprBar::ensureButtonInstances() {
 }
 
 void CHyprBar::updateButtonStateAnimations() {
+
+    // If a config reload deferred the instance rebuild, do it now.
+    // Ensures indices from buttonsLeft/buttonsRight are valid for
+    // m_vButtonInstances — onConfigReloaded sets the flag, but
+    // updateWindow / event handlers may call us before the next draw().
+    if (m_bInstsInvalid)
+        ensureButtonInstances();
 
     // Sync with the real focus state — updateWindow() may not be called for every
     // focus change, but updateButtonStateAnimations() runs on mouse move, press,
@@ -601,8 +618,6 @@ void CHyprBar::handleDownEvent(Event::SCallbackInfo& info, std::optional<ITouch:
     const auto HEIGHT           = g_pGlobalState->config.barHeight->value();
     const auto BARBUTTONPADDING = g_pGlobalState->config.barButtonPadding->value();
     const auto BARPADDING       = g_pGlobalState->config.barPadding->value();
-    const auto ON_DOUBLE_CLICK  = g_pGlobalState->config.onDoubleClick->value();
-
     if (!VECINRECT(COORDS, 0, 0, assignedBoxGlobal().w, HEIGHT - 1)) {
 
         if (m_bDraggingThis) {
@@ -636,9 +651,12 @@ void CHyprBar::handleDownEvent(Event::SCallbackInfo& info, std::optional<ITouch:
     if (doButtonPress(BARPADDING, BARBUTTONPADDING, HEIGHT, COORDS))
         return;
 
-    if (!ON_DOUBLE_CLICK.empty() &&
+    const auto& DBLACTION = g_pGlobalState->config.onDoubleClick;
+    const bool  HAS_ACTION = !DBLACTION.dispatcher.empty() || DBLACTION.callback != LUA_NOREF;
+
+    if (HAS_ACTION &&
         std::chrono::duration_cast<std::chrono::milliseconds>(Time::steadyNow() - m_lastMouseDown).count() < 400 /* Arbitrary delay I found suitable */) {
-        Config::Supplementary::executor()->spawn(ON_DOUBLE_CLICK);
+        executeButtonAction(DBLACTION);
         m_bDragPending = false;
     } else {
         m_lastMouseDown = Time::steadyNow();
@@ -884,7 +902,7 @@ void CHyprBar::renderBarButtons(CBox* barBox, const float scale, const float a) 
     const auto COORDS       = cursorRelativeToBar();
 
     size_t nth = 0;
-    for (auto& idx :indices) {
+    for (auto& idx : indices) {
         auto&      button           = g_pGlobalState->buttons[idx];
         auto&      inst             = m_vButtonInstances[idx];
 
@@ -908,6 +926,14 @@ void CHyprBar::renderBarButtons(CBox* barBox, const float scale, const float a) 
         CBox  buttonBox = {barBox->x + (BUTTONSRIGHT ? barBox->w - totalOffset - offset / 2.0 - scaledButtonSize : totalOffset + offset / 2.0),
                            barBox->y + (barBox->h - scaledButtonSize) / 2.0, scaledButtonSize, scaledButtonSize};
         buttonBox.round();
+
+        // renderRect asserts width/height > 0.  A tiny animation-intermediate
+        // scale (e.g. 0.001f) can round the box down to a zero dimension.
+        if (buttonBox.w <= 0 || buttonBox.h <= 0) {
+            totalOffset += scaledButtonsPad;
+            ++nth;
+            continue;
+        }
 
         g_pHyprOpenGL->renderRect(buttonBox, color, {.round = static_cast<int>(std::round(scaledButtonSize / 2.0)), .roundingPower = 2.F});
 
@@ -935,7 +961,9 @@ void CHyprBar::renderBarButtons(CBox* barBox, const float scale, const float a) 
                 renderIcon(tex, a * iconAlpha, iconScale, centerX);
         }
 
-        totalOffset += scaledButtonsPad + scaledButtonSize + (FIXCENTER ? OFFSET : 0.0f);
+        totalOffset += scaledButtonsPad + scaledButtonSize;
+        if (FIXCENTER) totalOffset += offset;
+        else if (nth == 0) totalOffset += offset / 2.0;
         ++nth;
     }
     };
@@ -961,8 +989,10 @@ void CHyprBar::draw(PHLMONITOR pMonitor, const float& a) {
     if (!PWINDOW->m_ruleApplicator->decorate().valueOrDefault())
         return;
 
-    if (m_vButtonInstances.size() != g_pGlobalState->buttons.size())
+    if (m_bInstsInvalid || m_vButtonInstances.size() != g_pGlobalState->buttons.size()) {
         ensureButtonInstances();
+        updateButtonStateAnimations();
+    }
 
     auto data = CBarPassElement::SBarData{this, a};
     g_pHyprRenderer->m_renderPass.add(makeUnique<CBarPassElement>(data));
@@ -1094,7 +1124,7 @@ void CHyprBar::renderPass(PHLMONITOR pMonitor, const float& a) {
         auto sideSize = [&](std::vector<size_t>& indices) -> float {
             float t = 0.0;
             if (!indices.empty()) t = -BARBUTTONPADDING;
-            for (auto& idx: indices) {
+            for (auto& idx : indices) {
                 t += buttons[idx].size + BARBUTTONPADDING;
             }
             return t;
@@ -1147,10 +1177,13 @@ void CHyprBar::updateWindow(PHLWINDOW pWindow) {
 
 void CHyprBar::onConfigReloaded() {
     m_pAnimConfig->internalSpeed  = g_pGlobalState->config.animationSpeed->value() / 100.0f;
-    m_pAnimConfig->internalBezier = g_pGlobalState->config.animationBezier->value();
+    const auto BEZIER = g_pGlobalState->config.animationBezier->value();
+    if (!BEZIER.empty())
+        m_pAnimConfig->internalBezier = BEZIER;
 
     m_bButtonsDirty      = true;
     m_bTitleColorChanged = true;
+    m_bInstsInvalid = true;
     m_pTextTex           = nullptr;
 
     auto pWin = m_pWindow.lock();
@@ -1160,8 +1193,6 @@ void CHyprBar::onConfigReloaded() {
     }
 
     invalidateButtonTextures();
-    ensureButtonInstances();
-    updateButtonStateAnimations();
 
     g_pDecorationPositioner->repositionDeco(this);
     damageEntire();
